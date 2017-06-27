@@ -3,7 +3,8 @@
 import socket
 from collections import namedtuple
 from struct import *
-from protocol import *
+
+from pysdcp.protocol import *
 
 Header = namedtuple("Header", ['version', 'category', 'community'])
 ProjInfo = namedtuple("ProjInfo", ['id', 'product_name', 'serial_number', 'power_state', 'location'])
