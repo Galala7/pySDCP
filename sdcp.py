@@ -1,67 +1,28 @@
 #! py3
 
 import socket
+from collections import namedtuple
 from struct import *
+from protocol import *
 
-# Defines and protocol details from here: https://www.digis.ru/upload/iblock/f5a/VPL-VW320,%20VW520_ProtocolManual.pdf
-
-ACTIONS = {
-    "GET": 0x01,
-    "SET": 0x00
-}
-
-COMMANDS = {
-    "SET_POWER": 0x0130,
-    "CALIBRATION_PRESET": 0x0002,
-    "ASPECT_RATIO": 0x0020,
-    "INPUT": 0x0001,
-    "GET_STATUS_ERROR": 0x0101,
-    "GET_STATUS_POWER": 0x0102,
-    "GET_STATUS_LAMP_TIMER": 0x0113
-}
-
-INPUTS = {
-    "HDMI1": 0x002,
-    "HDMI2": 0x003,
-}
-
-ASPECT_RATIOS = {
-    "NORMAL": '0001',
-    "V_STRETCH": '000B',
-    "ZOOM_1_85": '000C',
-    "ZOOM_2_35": '000D',
-    "STRETCH": '000E',
-    "SQUEEZE": '000F'
-}
-
-POWER_STATUS = {
-    "STANDBY": 0,
-    "START_UP": 1,
-    "START_UP_LAMP": 2,
-    "POWER_ON": 3,
-    "COOLING": 4,
-    "COOLING2": 5
-}
-
-UDP_IP = ""
-UDP_PORT = 53862
-TCP_PORT = 53484
+Header = namedtuple("Header", ['version', 'category', 'community'])
+ProjInfo = namedtuple("ProjInfo", ['id', 'product_name', 'serial_number', 'power_state', 'location'])
 
 
-def create_msg_buffer(projector, action, command, data=None):
+def create_command_buffer(header: Header, action, command, data=None):
     # create bytearray in the right size
     if data is not None:
         my_buf = bytearray(12)
     else:
         my_buf = bytearray(10)
     # header
-    my_buf[0] = projector.version
-    my_buf[1] = projector.category
+    my_buf[0] = 2  # only works with version 2, don't know why
+    my_buf[1] = header.category
     # community
-    my_buf[2] = ord(projector.community[0])
-    my_buf[3] = ord(projector.community[1])
-    my_buf[4] = ord(projector.community[2])
-    my_buf[5] = ord(projector.community[3])
+    my_buf[2] = ord(header.community[0])
+    my_buf[3] = ord(header.community[1])
+    my_buf[4] = ord(header.community[2])
+    my_buf[5] = ord(header.community[3])
     # command
     my_buf[6] = action
     pack_into(">H", my_buf, 7, command)
@@ -75,19 +36,37 @@ def create_msg_buffer(projector, action, command, data=None):
     return my_buf
 
 
-def process_respons(msgBuf):
-    my_projector = Projector()
-    my_projector.version = int(msgBuf[0])
-    my_projector.category = int(msgBuf[1])
-    my_projector.community = decode_text_field(msgBuf[2:6])
-    success = int(msgBuf[6])
+def process_command_response(msgBuf):
+    my_header = Header(
+        version=int(msgBuf[0]),
+        category=int(msgBuf[1]),
+        community=decode_text_field(msgBuf[2:6]))
+    is_success = bool(msgBuf[6])
     command = unpack(">H", msgBuf[7:9])[0]
     data_len = int(msgBuf[9])
     if data_len != 0:
         data = unpack(">H", msgBuf[10:10 + data_len])[0]
     else:
         data = None
-    return my_projector, success, command, data
+    return my_header, is_success, command, data
+
+
+def process_SDAP(SDAP_buffer) -> (Header, ProjInfo):
+    try:
+        my_header = Header(
+            version=int(SDAP_buffer[2]),
+            category=int(SDAP_buffer[3]),
+            community=decode_text_field(SDAP_buffer[4:8]))
+        my_info = ProjInfo(
+            id=SDAP_buffer[0:2].decode(),
+            product_name=decode_text_field(SDAP_buffer[8:20]),
+            serial_number=unpack('>I', SDAP_buffer[20:24])[0],
+            power_state=unpack('>H', SDAP_buffer[24:26])[0],
+            location=decode_text_field(SDAP_buffer[26:]))
+    except Exception as e:
+        print("Error parsing SDAP packet: {}".format(e))
+        raise
+    return my_header, my_info
 
 
 def decode_text_field(buf):
@@ -100,91 +79,122 @@ def decode_text_field(buf):
 
 
 class Projector:
-    def __init__(self, SDAP_packet=None, addr=None):
-        if SDAP_packet is None:
+    def __init__(self, ip: str = None):
+        """
+        Base class for projector communication. 
+        Enables communication with Projector, Sending commands and Querying Power State
+         
+        :param ip: str, IP address for projector. if given, will create a projector with default values to communicate
+            with projector on the given ip.  i.e. "10.0.0.5"
+        """
+        self.info = ProjInfo(
+            product_name=None,
+            serial_number=None,
+            power_state=None,
+            location=None,
+            id=None)
+        if ip is None:
+            # Create empty Projector object
+            self.ip = None
+            self.header = Header(version=None, category=None, community=None)
             self.is_init = False
-            self.addr = None
-            self.ID = None
-            self.version = None
-            self.category = None
-            self.community = None
-            self.product_name = None
-            self.serial_number = None
-            self.power_state = None
-            self.location = None
         else:
-            self._from_header(SDAP_packet, addr)
-
-    def _from_header(self, SDAP_packet, addr):
-        try:
-            self.addr = addr[0]
-            self.ID = SDAP_packet[0:2].decode()
-            # self.version = int(SDAP_packet[2])
-            self.version = 2  # only works with version 2, don't know why
-            self.category = int(SDAP_packet[3])
-            self.community = decode_text_field(SDAP_packet[4:8])
-            self.product_name = decode_text_field(SDAP_packet[8:20])
-            self.serial_number = unpack('>I', SDAP_packet[20:24])[0]
-            self.power_state = unpack('>H', SDAP_packet[24:26])[0]
-            self.location = decode_text_field(SDAP_packet[26:])
+            # Create projector from known ip
+            # Set default values to enable immediately communication with known project (ip)
+            self.ip = ip
+            self.header = Header(category=10, version=2, community="SONY")
             self.is_init = True
-        except Exception as e:
-            print("Error parsing SDAP packet: {}".format(e))
-            raise
+
+        # Default ports
+        self.UDP_IP = ""
+        self.UDP_PORT = 53862
+        self.TCP_PORT = 53484
+        self.TCP_TIMEOUT = 2
+        self.UDP_TIMEOUT = 31
 
     def __eq__(self, other):
-        return self.serial_number == other.serail_number
+        return self.info.serial_number == other.info.serail_number
 
-    def find_projector(self):
-
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind((UDP_IP, UDP_PORT))
-        # TODO: Use timeout for recvfrom - up to 62 sec to allow 2 announces (one every 30 sec)
-        SDAP_packet, addr = sock.recvfrom(1028)
-        self._from_header(SDAP_packet, addr)
-
-    def _send_command(self, action, command, data=None):
+    def _send_command(self, action, command, data=None, timeout=None):
+        timeout = timeout if timeout is not None else self.TCP_TIMEOUT
         if not self.is_init:
             self.find_projector()
-        # TODO: add timeout
+        if not self.is_init:
+            raise Exception("No projector found and / or specified")
 
-        my_buf = create_msg_buffer(self, action, command, data)
+        my_buf = create_command_buffer(self.header, action, command, data)
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect((self.addr, TCP_PORT))
-        sent = sock.send(my_buf)
+        sock.settimeout(timeout)
+        try:
+            sock.connect((self.ip, self.TCP_PORT))
+            sent = sock.send(my_buf)
+        except socket.timeout as e:
+            raise Exception("Timeout while trying to send command {}".format(command)) from e
 
         if len(my_buf) != sent:
-            raise ConnectionError
+            raise ConnectionError(
+                "Failed sending entire buffer to projector. Sent {} out of {} !".format(sent, len(my_buf)))
         response_buf = sock.recv(1024)
         sock.close()
 
-        _, is_success, _, data = process_respons(response_buf)
-        return is_success, data
+        _, is_success, _, data = process_command_response(response_buf)
+
+        if not is_success:
+            raise Exception(
+                "Received failed status from projector while sending command 0x{:x}. Error 0x{:x}".format(command,
+                                                                                                          data))
+        return data
+
+    def find_projector(self, udp_ip: str = None, udp_port: int = None, timeout=None):
+
+        self.UDP_PORT = udp_port if udp_port is not None else self.UDP_PORT
+        self.UDP_IP = udp_ip if udp_ip is not None else self.UDP_IP
+        timeout = timeout if timeout is not None else self.UDP_TIMEOUT
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        sock.bind((self.UDP_IP, self.UDP_PORT))
+
+        sock.settimeout(timeout)
+        try:
+            SDAP_buffer, addr = sock.recvfrom(1028)
+        except socket.timeout as e:
+            return False
+
+        self.header, self.info = process_SDAP(SDAP_buffer)
+        self.ip = addr[0]
+        self.is_init = True
 
     def set_power(self, on=True):
-        return self._send_command(action=ACTIONS["SET"], command=COMMANDS["SET_POWER"],
-                                  data=POWER_STATUS["START_UP"] if on else POWER_STATUS["STANDBY"])
+        self._send_command(action=ACTIONS["SET"], command=COMMANDS["SET_POWER"],
+                           data=POWER_STATUS["START_UP"] if on else POWER_STATUS["STANDBY"])
+        return True
 
-    def set_HDMI_input(self, hdmi_num):
-        return self._send_command(action=ACTIONS["SET"], command=COMMANDS["INPUT"],
-                                  data=INPUTS["HDMI1"] if hdmi_num == 1 else INPUTS["HDMI2"])
+    def set_HDMI_input(self, hdmi_num: int):
+        self._send_command(action=ACTIONS["SET"], command=COMMANDS["INPUT"],
+                           data=INPUTS["HDMI1"] if hdmi_num == 1 else INPUTS["HDMI2"])
+        return True
 
     def get_power(self):
-        is_success, data = self._send_command(action=ACTIONS["GET"], command=COMMANDS["GET_STATUS_POWER"])
-        if is_success == 1:
-            if data == POWER_STATUS["STANDBY"] or data == POWER_STATUS["COOLING"] or data == POWER_STATUS["COOLING2"]:
-                return False
-            else:
-                return True
+        data = self._send_command(action=ACTIONS["GET"], command=COMMANDS["GET_STATUS_POWER"])
+        if data == POWER_STATUS["STANDBY"] or data == POWER_STATUS["COOLING"] or data == POWER_STATUS["COOLING2"]:
+            return False
         else:
-            print("fail")
+            return True
 
 
 if __name__ == '__main__':
-    a = Projector()
-    print(a.get_power())
-    # a.set_HDMI_input(1)
-    # a.set_HDMI_input(2)
-    #
-    # a.set_power(False)
+    # b = Projector()
+    # b.find_projector(timeout=1)
+    # # print(b.get_power())
+    # # b = Projector("10.0.0.139")
+    # # #
+    # print(b.get_power())
+    # print(b.set_power(False))
+    # # import time
+    # # time.sleep(7)
+    # print (b.set_HDMI_input(1))
+    # # time.sleep(7)
+    # # print (b.set_HDMI_input(2))
+    pass
