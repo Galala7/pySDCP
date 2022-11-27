@@ -114,7 +114,7 @@ class Projector:
         self.UDP_TIMEOUT = 31
 
     def __eq__(self, other):
-        return self.info.serial_number == other.info.serail_number
+        return self.info.serial_number == other.info.serial_number
 
     def _send_command(self, action, command, data=None, timeout=None):
         timeout = timeout if timeout is not None else self.TCP_TIMEOUT
