@@ -113,6 +113,12 @@ class Projector:
         self.TCP_TIMEOUT = 2
         self.UDP_TIMEOUT = 31
 
+        # Valid settings
+        self.SCREEN_SETTINGS = {
+            "ASPECT_RATIO": ASPECT_RATIOS,
+            "PICTURE_POSITION": PICTURE_POSITIONS,
+            }
+
     def __eq__(self, other):
         return self.info.serial_number == other.info.serail_number
 
@@ -175,6 +181,18 @@ class Projector:
     def set_HDMI_input(self, hdmi_num: int):
         self._send_command(action=ACTIONS["SET"], command=COMMANDS["INPUT"],
                            data=INPUTS["HDMI1"] if hdmi_num == 1 else INPUTS["HDMI2"])
+        return True
+
+    def set_screen(self, command: str, value: str):
+        valid_values = self.SCREEN_SETTINGS.get(command)
+        if valid_values is None:
+            raise Exception("Invalid screen setting {}".format(command))
+
+        if value not in valid_values:
+            raise Exception("Invalid parameter: {}. Expected one of: {}".format(value, valid_values.keys()))
+
+        self._send_command(action=ACTIONS["SET"], command=COMMANDS[command],
+                           data=valid_values[value])
         return True
 
     def get_power(self):
